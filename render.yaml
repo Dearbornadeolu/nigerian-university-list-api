@@ -3,8 +3,12 @@ services:
     name: nigerian-university-list-api
     env: go
     plan: free
+    repo: https://github.com/Dearbornadeolu/nigerian-university-list-api
+    branch: main
     buildCommand: go build -tags netgo -ldflags '-s -w' -o app
     startCommand: ./app
     envVars:
       - key: GOTOOLCHAIN
         value: go1.24.6
+      - key: DATABASE_URL
+        sync: false # Set manually in dashboard for security

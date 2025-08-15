@@ -35,10 +35,17 @@ type UniversityData struct {
 var db *pgxpool.Pool
 
 func main() {
-	// Load environment variables from .env file
+	// Load environment variables from .env file (optional for local development)
 	if err := godotenv.Load(); err != nil {
-		log.Fatalf("Error loading .env file: %v", err)
+		log.Printf("No .env file found, relying on system environment variables: %v", err)
 	}
+
+	// Validate DATABASE_URL
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatal("DATABASE_URL environment variable not set")
+	}
+	log.Printf("DATABASE_URL loaded: %s", databaseURL)
 
 	var err error
 	db, err = connectDB()
@@ -47,11 +54,12 @@ func main() {
 	}
 	defer db.Close()
 
-	// Print statement to confirm database connection
-	fmt.Println("Successfully connected to the database!")
+	// Confirm database connection
+	log.Println("Successfully connected to the database!")
 
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(middleware.RequestID) // Add request ID for tracing
+	r.Use(middleware.Logger)    // Chi's default logger for HTTP requests
 	r.Use(middleware.Recoverer)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"}, // Allow all origins for development
@@ -71,16 +79,16 @@ func main() {
 		r.Get("/foreign", getByTypeHandler("foreign_universities_accredited_by_nuc"))
 	})
 
-	fmt.Println("Server is running on port 8080...")
-	log.Fatal(http.ListenAndServe(":8080", r))
+	log.Println("Server is running on port 8080...")
+	if err := http.ListenAndServe(":8080", r); err != nil {
+		log.Fatalf("Server failed to start: %v", err)
+	}
 }
 
 // connectDB establishes a connection to the Supabase PostgreSQL database.
 func connectDB() (*pgxpool.Pool, error) {
 	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		return nil, fmt.Errorf("DATABASE_URL environment variable not set")
-	}
+	log.Printf("Attempting to connect to database with URL: %s", databaseURL)
 
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
@@ -92,78 +100,89 @@ func connectDB() (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("unable to connect to database: %v", err)
 	}
 
+	// Test the connection
+	if err := pool.Ping(context.Background()); err != nil {
+		return nil, fmt.Errorf("database ping failed: %v", err)
+	}
+	log.Println("Database connection established successfully")
 	return pool, nil
 }
 
 // uploadHandler handles the POST request to upload the JSON data.
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetReqID(r.Context())
+	log.Printf("Request %s: Handling POST /api/v1/universities/upload", reqID)
+
 	if r.Method != http.MethodPost {
+		log.Printf("Request %s: Invalid method: %s", reqID, r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Read the entire request body
+	// Decode JSON
+	log.Printf("Request %s: Decoding JSON request body", reqID)
 	var data UniversityData
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		log.Printf("Request %s: Failed to decode JSON: %v", reqID, err)
 		http.Error(w, "Invalid JSON data: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	log.Printf("Request %s: JSON decoded, universities - federal: %d, state: %d, private: %d, foreign: %d",
+		reqID,
+		len(data.UniversitiesInNigeria2025.FederalUniversities),
+		len(data.UniversitiesInNigeria2025.StateUniversities),
+		len(data.UniversitiesInNigeria2025.PrivateUniversities),
+		len(data.UniversitiesInNigeria2025.ForeignUniversities))
+
 	tx, err := db.Begin(context.Background())
 	if err != nil {
+		log.Printf("Request %s: Failed to start transaction: %v", reqID, err)
 		http.Error(w, "Failed to start transaction: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer tx.Rollback(context.Background()) // Rollback on error
 
-	// Insert federal universities
-	err = insertUniversities(tx, "federal_universities", data.UniversitiesInNigeria2025.FederalUniversities)
-	if err != nil {
-		http.Error(w, "Failed to insert federal universities: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Insert state universities
-	err = insertUniversities(tx, "state_universities", data.UniversitiesInNigeria2025.StateUniversities)
-	if err != nil {
-		http.Error(w, "Failed to insert state universities: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Insert private universities
-	err = insertUniversities(tx, "private_universities", data.UniversitiesInNigeria2025.PrivateUniversities)
-	if err != nil {
-		http.Error(w, "Failed to insert private universities: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Insert foreign accredited universities
-	err = insertUniversities(tx, "foreign_universities_accredited_by_nuc", data.UniversitiesInNigeria2025.ForeignUniversities)
-	if err != nil {
-		http.Error(w, "Failed to insert foreign universities: "+err.Error(), http.StatusInternalServerError)
-		return
+	// Insert universities
+	for _, uniType := range []struct {
+		name string
+		data []map[string]interface{}
+	}{
+		{"federal_universities", data.UniversitiesInNigeria2025.FederalUniversities},
+		{"state_universities", data.UniversitiesInNigeria2025.StateUniversities},
+		{"private_universities", data.UniversitiesInNigeria2025.PrivateUniversities},
+		{"foreign_universities_accredited_by_nuc", data.UniversitiesInNigeria2025.ForeignUniversities},
+	} {
+		log.Printf("Request %s: Inserting %d universities of type %s", reqID, len(uniType.data), uniType.name)
+		if err := insertUniversities(tx, uniType.name, uniType.data); err != nil {
+			log.Printf("Request %s: Failed to insert %s: %v", reqID, uniType.name, err)
+			http.Error(w, fmt.Sprintf("Failed to insert %s: %v", uniType.name, err), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	if err := tx.Commit(context.Background()); err != nil {
+		log.Printf("Request %s: Failed to commit transaction: %v", reqID, err)
 		http.Error(w, "Failed to commit transaction: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	log.Printf("Request %s: Data uploaded successfully", reqID)
 	w.WriteHeader(http.StatusCreated)
 	w.Write([]byte("Data uploaded successfully!"))
 }
 
 // insertUniversities is a helper function to insert universities of a specific type.
 func insertUniversities(tx pgx.Tx, universityType string, unis []map[string]interface{}) error {
-	for _, u := range unis {
+	for i, u := range unis {
 		jsonData, err := json.Marshal(u)
 		if err != nil {
-			return fmt.Errorf("failed to marshal university data: %v", err)
+			return fmt.Errorf("failed to marshal university data at index %d: %v", i, err)
 		}
 
 		_, err = tx.Exec(context.Background(), "INSERT INTO uni (university_type, data) VALUES ($1, $2)", universityType, jsonData)
 		if err != nil {
-			return fmt.Errorf("failed to insert data for university type %s: %v", universityType, err)
+			return fmt.Errorf("failed to insert data for university type %s at index %d: %v", universityType, i, err)
 		}
 	}
 	return nil
@@ -171,22 +190,32 @@ func insertUniversities(tx pgx.Tx, universityType string, unis []map[string]inte
 
 // getAllUniversitiesHandler retrieves all universities from the database.
 func getAllUniversitiesHandler(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetReqID(r.Context())
+	log.Printf("Request %s: Fetching all universities", reqID)
+
 	universities, err := queryUniversities(context.Background(), "")
 	if err != nil {
+		log.Printf("Request %s: Failed to retrieve universities: %v", reqID, err)
 		http.Error(w, "Failed to retrieve universities: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	log.Printf("Request %s: Retrieved %d universities", reqID, len(universities))
 	sendJSONResponse(w, universities)
 }
 
 // getByTypeHandler returns a handler function for a specific university type.
 func getByTypeHandler(uniType string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		reqID := middleware.GetReqID(r.Context())
+		log.Printf("Request %s: Fetching universities of type %s", reqID, uniType)
+
 		universities, err := queryUniversities(context.Background(), uniType)
 		if err != nil {
+			log.Printf("Request %s: Failed to retrieve universities for type %s: %v", reqID, uniType, err)
 			http.Error(w, "Failed to retrieve universities by type: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		log.Printf("Request %s: Retrieved %d universities for type %s", reqID, len(universities), uniType)
 		sendJSONResponse(w, universities)
 	}
 }
@@ -200,9 +229,8 @@ func queryUniversities(ctx context.Context, uniType string) ([]University, error
 	} else {
 		rows, err = db.Query(ctx, "SELECT university_type, data FROM uni WHERE university_type = $1", uniType)
 	}
-
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to query universities: %v", err)
 	}
 	defer rows.Close()
 
@@ -210,13 +238,13 @@ func queryUniversities(ctx context.Context, uniType string) ([]University, error
 	for rows.Next() {
 		var u University
 		if err := rows.Scan(&u.UniversityType, &u.Data); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to scan university row: %v", err)
 		}
 		universities = append(universities, u)
 	}
 
-	if rows.Err() != nil {
-		return nil, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating university rows: %v", err)
 	}
 
 	return universities, nil
@@ -226,6 +254,7 @@ func queryUniversities(ctx context.Context, uniType string) ([]University, error
 func sendJSONResponse(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("Failed to encode JSON response: %v", err)
 		http.Error(w, "Failed to encode JSON response", http.StatusInternalServerError)
 	}
 }
