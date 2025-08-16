@@ -95,6 +95,10 @@ func connectDB() (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("unable to parse DATABASE_URL: %v", err)
 	}
 
+	// Force IPv4 by setting Host explicitly or disabling IPv6
+	config.ConnConfig.PreferSimpleProtocol = true
+	config.ConnConfig.DialFunc = nil
+
 	pool, err := pgxpool.ConnectConfig(context.Background(), config)
 	if err != nil {
 		return nil, fmt.Errorf("unable to connect to database: %v", err)
