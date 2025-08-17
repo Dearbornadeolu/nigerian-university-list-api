@@ -35,7 +35,7 @@ type UniversityData struct {
 var db *pgxpool.Pool
 
 func main() {
-	// Load environment variables from .env file (optional for local development)
+	// Load environment variables from .env file 
 	if err := godotenv.Load(); err != nil {
 		log.Printf("No .env file found, relying on system environment variables: %v", err)
 	}
@@ -59,7 +59,7 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID) // Add request ID for tracing
-	r.Use(middleware.Logger)    // Chi's default logger for HTTP requests
+	r.Use(middleware.Logger)    
 	r.Use(middleware.Recoverer)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"}, // Allow all origins for development
@@ -95,7 +95,7 @@ func connectDB() (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("unable to parse DATABASE_URL: %v", err)
 	}
 
-	// Force IPv4 by setting Host explicitly or disabling IPv6
+	
 	config.ConnConfig.PreferSimpleProtocol = true
 	config.ConnConfig.DialFunc = nil
 
@@ -145,7 +145,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to start transaction: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer tx.Rollback(context.Background()) // Rollback on error
+	defer tx.Rollback(context.Background()) 
 
 	// Insert universities
 	for _, uniType := range []struct {
